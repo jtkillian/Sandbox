@@ -81,7 +81,12 @@ if ~isfolder(p)
     % drop a .gitkeep so the folder stays in the repo when committed
     try
         k = fullfile(p,'.gitkeep');
-        if ~isfile(k), fclose(fopen(k,'w')); end
+        if exist(k, 'file') ~= 2
+            fid = fopen(k, 'w');
+            if fid > 0
+                fclose(fid);
+            end
+        end
     catch
     end
 end
@@ -104,7 +109,7 @@ function writeEmptyCobertura(outfile)
 ensureDir(fileparts(outfile));
 fid = fopen(outfile,'w');
 assert(fid>0, 'Cannot write %s', outfile);
-ts = datestr(now,'yyyy-mm-ddTHH:MM:SS');
+ts = string(datetime('now', 'Format', 'yyyy-MM-ddTHH:mm:ss'));
 fprintf(fid, ['<?xml version="1.0" ?>\n' ...
     '<!DOCTYPE coverage SYSTEM "http://cobertura.sourceforge.net/xml/coverage-04.dtd">\n' ...
     '<coverage line-rate="0" branch-rate="0" version="MATLAB-CI" timestamp="%s" lines-valid="0" lines-covered="0">\n' ...
