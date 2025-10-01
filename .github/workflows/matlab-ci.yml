@@ -41,7 +41,7 @@ jobs:
 
       # Auto-assign and auto-request reviewer (you) on PR open
       - name: Auto-assign & request reviewer
-        if: ${{ and(eq(github.event_name, 'pull_request'), eq(github.event.action, 'opened')) }}
+        if: github.event_name == 'pull_request' && github.event.action == 'opened'
         env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
         run: |
           gh pr edit ${{ github.event.number }} --add-assignee jtkillian || true
