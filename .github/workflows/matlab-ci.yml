@@ -19,16 +19,19 @@ env:
   MIN_COVERAGE: "60"
 
   # AI controls (quota-safe)
-  MODEL_ID: "openai/o4-mini"   # chosen model
+  MODEL_ID: "openai/o4-mini"   # selected model
   CI_AI_ENABLED: "1"           # 1=allow AI, 0=never call models
-  CI_AI_ON_SUCCESS: "0"        # 1=also summarize passing PRs (consumes more quota)
+  CI_AI_ON_SUCCESS: "0"        # 1=AI summary even on passing PRs (uses more quota)
 
 jobs:
   test-and-review:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (shallow is fine)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Label PR as in-progress
         uses: actions-ecosystem/action-add-labels@v1
@@ -54,6 +57,18 @@ jobs:
         if: steps.policy.outputs.policy_fail == 'true'
         uses: actions-ecosystem/action-add-labels@v1
         with: { labels: "policy:wrong-branch" }
+
+      # ----- NEW: make shallow diff robust on PRs -----
+      - name: Determine PR SHAs & fetch just those commits
+        id: shas
+        shell: bash
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "base=$BASE" >> $GITHUB_OUTPUT
+          echo "head=$HEAD" >> $GITHUB_OUTPUT
+          # Fetch the two objects so diff works even with shallow checkout
+          git fetch --no-tags --depth=1 origin $BASE $HEAD
 
       - uses: matlab-actions/setup-matlab@v2
 
@@ -101,6 +116,8 @@ jobs:
           F=${{ steps.analyze.outputs.failures }}
           E=${{ steps.analyze.outputs.errors }}
           COV=${{ steps.analyze.outputs.coverage }}
+          BASE=${{ steps.shas.outputs.base }}
+          HEAD=${{ steps.shas.outputs.head }}
           {
             echo "# CI Notes (latest)"
             echo "- **PR:** #${{ github.event.number }}"
@@ -113,7 +130,9 @@ jobs:
             echo "- Coverage: ${COV}% (target ${MIN_COVERAGE}%)"
             echo
             echo "## Impact (files changed)"
-            echo '```diff'; git --no-pager diff --name-status origin/${{ github.base_ref }}... | sed -e 's/^/  /'; echo '```'
+            echo '```diff'
+            git --no-pager diff --name-status "$BASE...$HEAD" | sed -e 's/^/  /'
+            echo '```'
           } > "$FILE"
           echo "path=$FILE" >> $GITHUB_OUTPUT
 
@@ -131,7 +150,6 @@ jobs:
         shell: bash
         run: |
           set -e
-          # Skip if we've already done it
           if gh api repos/${{ github.repository }}/issues/${{ github.event.number }} --jq '.labels[].name' | grep -qx 'ci:ai-initialized'; then
             echo "Initial AI review already posted; skipping."
             exit 0
@@ -139,7 +157,9 @@ jobs:
 
           TITLE="${{ github.event.pull_request.title }}"
           BODY=$(jq -r '.pull_request.body // ""' <<< '${{ toJson(github.event) }}')
-          DIFF=$(git --no-pager diff --unified=0 --no-color origin/${{ github.base_ref }}... | head -c 15000)
+          BASE=${{ steps.shas.outputs.base }}
+          HEAD=${{ steps.shas.outputs.head }}
+          DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" | head -c 15000)
 
           read -r -d '' PAYLOAD <<JSON
           {
@@ -173,22 +193,9 @@ jobs:
             } > "$FILE"
           fi
 
-          # sticky initial (posted once)
-          gh workflow run noop.yaml >/dev/null 2>&1 || true  # no-op if not present
           gh api repos/${{ github.repository }}/issues/${{ github.event.number }} -X POST \
             -f labels='["ci:ai-initialized"]' >/dev/null
 
-          gh workflow run noop.yaml >/dev/null 2>&1 || true
-          echo "::group::Post sticky initial"
-          gh api graphql -f query='
-            query($owner:String!,$name:String!,$number:Int!){
-              repository(owner:$owner,name:$name){
-                pullRequest(number:$number){ id }
-              }
-            }' -F owner='${{ github.repository_owner }}' -F name='${{ github.event.repository.name }}' -F number='${{ github.event.number }}' >/dev/null 2>&1 || true
-          echo "::endgroup::"
-
-          gh extension install marocchino/gh-pr-comment@latest >/dev/null 2>&1 || true
           gh pr comment ${{ github.event.number }} --body "$(printf '### (One-time) Initial AI Review\n\n%s' "$(cat "$FILE")")"
 
       - name: Upload artifacts
@@ -203,7 +210,7 @@ jobs:
             code-coverage/coverage.xml
           if-no-files-found: warn
 
-      # Gate + notify (and ping Copilot if needed). One AI try, with graceful fallback.
+      # Gate + notify (AI try -> fallback). Uses the shallow-safe SHAs for diffs.
       - name: Gate + notify (AI try -> fallback)
         if: always()
         env:
@@ -241,11 +248,12 @@ jobs:
           fi
           gh issue edit ${{ github.event.number }} --add-label "ci:rev-${NEXT}"
 
-          # Try one AI fix-plan if enabled; fall back to deterministic prompt
           if [ "${CI_AI_ENABLED}" = "1" ]; then
             TITLE="${{ github.event.pull_request.title }}"
             BODY=$(jq -r '.pull_request.body // ""' <<< '${{ toJson(github.event) }}')
-            DIFF=$(git --no-pager diff --unified=0 --no-color origin/${{ github.base_ref }}... | head -c 16000)
+            BASE=${{ steps.shas.outputs.base }}
+            HEAD=${{ steps.shas.outputs.head }}
+            DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" | head -c 16000)
             read -r -d '' PAYLOAD <<JSON
             {
               "model": "${MODEL_ID}",
