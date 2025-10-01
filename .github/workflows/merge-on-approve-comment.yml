@@ -1,14 +1,45 @@
-# .github/workflows/merge-on-approve-comment.yml
-name: Merge on /approve
-on: { issue_comment: { types: [created] } }
-permissions: { contents: write, pull-requests: write }
+name: Secret scan (TruffleHog)
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
-  merge:
-    if: ${{ github.event.issue.pull_request && github.event.comment.body == '/approve' && github.actor == 'jtkillian' }}
+  trufflehog:
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          PR_URL="${{ github.event.issue.html_url }}"
-          gh pr review --approve "$PR_URL"
-          gh pr merge --auto --rebase "$PR_URL"
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+      - name: Checkout (full history for deep scan)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute scan range
+        id: range
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+          echo "base=$BASE" >> $GITHUB_OUTPUT
+          echo "head=$HEAD" >> $GITHUB_OUTPUT
+
+      - name: TruffleHog - scan changed commits (verified-only)
+        uses: trufflesecurity/trufflehog@v3.90.8
+        with:
+          args: >
+            git
+            --only-verified
+            ${{ steps.range.outputs.base }}
+            ${{ steps.range.outputs.head }}
+            .
