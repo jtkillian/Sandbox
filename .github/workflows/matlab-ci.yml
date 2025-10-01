@@ -217,12 +217,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL_ID: ${{ env.MODEL_ID }}
+          EVENT_JSON: ${{ toJson(github.event) }}
         shell: bash
         run: |
           set -e
           if gh api repos/${{ github.repository }}/issues/${{ github.event.number }} --jq '.labels[].name' 2>/dev/null | grep -qx 'ci:ai-initialized'; then exit 0; fi
           TITLE="${{ github.event.pull_request.title }}"
-          BODY=$(jq -r '.pull_request.body // ""' <<< '${{ toJson(github.event) }}')
+          BODY=$(jq -r '.pull_request.body // ""' <<< "$EVENT_JSON")
           BASE=${{ steps.shas.outputs.base }}
           HEAD=${{ steps.shas.outputs.head }}
           DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" 2>/dev/null | head -c 15000)
