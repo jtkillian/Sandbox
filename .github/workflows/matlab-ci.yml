@@ -1,8 +1,7 @@
 name: MATLAB CI + AI Review Loop
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request: {}               # run on all PR events
   push:
     branches: ['**']
   workflow_dispatch: {}
@@ -30,15 +29,21 @@ env:
 
 jobs:
   test-and-review:
-    name: test-and-review
     runs-on: ubuntu-latest
     environment: copilot
 
     steps:
-      - name: Checkout (shallow is fine)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+        with: { fetch-depth: 1 }
+
+      # Auto-assign and auto-request reviewer (you) on PR open
+      - name: Auto-assign & request reviewer
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'opened' }}
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        run: |
+          gh pr edit ${{ github.event.number }} --add-assignee jtkillian || true
+          gh pr edit ${{ github.event.number }} --add-reviewer jtkillian || true
 
       - name: Label PR as in-progress
         if: ${{ github.event_name == 'pull_request' }}
@@ -69,7 +74,7 @@ jobs:
         with: { labels: "policy:wrong-branch" }
         continue-on-error: true
 
-      # Fork-safe "changed files" (no git fetch of fork needed)
+      # Fork-safe file list via API (no fragile git fetch of forks)
       - name: Compute changed files (PR-safe via API)
         if: ${{ github.event_name == 'pull_request' }}
         id: files
@@ -105,7 +110,7 @@ jobs:
         run: |
           if [ -f run_ci.m ]; then echo "present=true" >> $GITHUB_OUTPUT; else echo "present=false" >> $GITHUB_OUTPUT; fi
 
-      # Path A: run custom run_ci.m (continue-on-error so we can fallback)
+      # A) Use your custom CI script if present
       - name: Run MATLAB CI (run_ci.m)
         id: run_matlab
         if: steps.has_run_ci.outputs.present == 'true'
@@ -117,10 +122,10 @@ jobs:
               run_ci
             catch ME
               disp(getReport(ME,'extended'));
-              exit(2);   % mark step failure while allowing workflow to continue
+              exit(2);
             end
 
-      # Path B: no run_ci.m – use official auto-discovery tests
+      # B) Otherwise, run default tests with artifacts
       - name: Run MATLAB tests (auto-discover)
         id: run_tests
         if: steps.has_run_ci.outputs.present != 'true'
@@ -130,7 +135,6 @@ jobs:
           test-results-junit: test-results/results.xml
           code-coverage-cobertura: code-coverage/coverage.xml
 
-      # Ensure reports exist (if MATLAB couldn’t run, write placeholders)
       - name: Ensure reports exist (fallback)
         shell: bash
         run: |
@@ -147,7 +151,7 @@ jobs:
             '</coverage>' > code-coverage/coverage.xml
           [ -f ci/CI-NOTES.md ] || echo "# CI Notes (initial)" > ci/CI-NOTES.md
 
-      - name: Summarize tests & coverage (outputs)
+      - name: Summarize tests & coverage
         id: analyze
         run: |
           python3 - <<'PY' > _out.json
@@ -178,7 +182,7 @@ jobs:
           jq -r .failed_list _out.json >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Build CI-NOTES.md (non-AI, fork-safe)
+      - name: Build CI-NOTES.md (fork-safe)
         id: notes
         shell: bash
         run: |
@@ -187,13 +191,11 @@ jobs:
           F=${{ steps.analyze.outputs.failures }}
           E=${{ steps.analyze.outputs.errors }}
           COV=${{ steps.analyze.outputs.coverage }}
-
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             DIFF="${{ steps.files.outputs.text }}"
           else
             DIFF=$(git --no-pager show --name-status --pretty="" ${{ github.sha }} | sed -e 's/^/  /')
           fi
-
           {
             echo "# CI Notes (latest)"
             if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -222,7 +224,7 @@ jobs:
           path: ${{ steps.notes.outputs.path }}
         continue-on-error: true
 
-      # One-time initial AI PR summary (quota-safe, JSON-escaped)
+      # One-time initial AI PR summary for bot PRs only (anti-injection)
       - name: One-time Initial AI Review (bot branches only)
         if: ${{ github.event_name == 'pull_request'
                 && env.CI_AI_ENABLED == '1'
@@ -250,7 +252,7 @@ jobs:
             }' > payload.json
           HTTP=$(curl -sS -w "%{http_code}" -o _ai.json -X POST https://models.github.ai/inference/chat/completions \
             -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "X-GitHub-Api-Version": "2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
+            -H "X-GitHub-Api-Version: 2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
           mkdir -p ci
           FILE=ci/CI-NOTES-INITIAL.md
           if [ "$HTTP" = "200" ]; then
@@ -275,7 +277,8 @@ jobs:
 
       # Gate + notify (AI try -> fallback). Allows empty repos to PASS.
       - name: Gate + notify (AI try -> fallback)
-        if: always()
+        id: gate
+        if: always() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -301,7 +304,7 @@ jobs:
 
           if [ $NEEDS -eq 0 ]; then
             gh issue edit ${{ github.event.number }} --add-label "ci:passed" >/dev/null 2>&1 || true
-            echo "All good."
+            echo "need_fix=0" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -313,20 +316,18 @@ jobs:
           if [ $NEXT -gt ${{ env.MAX_REVISIONS }} ]; then
             gh issue edit ${{ github.event.number }} --add-label "ci:error-loop" >/dev/null 2>&1 || true
             gh pr comment ${{ github.event.number }} --body "⚠️ Auto-refinement cap (${{ env.MAX_REVISIONS }}) reached. @jtkillian please review." >/dev/null 2>&1 || true
+            echo "need_fix=1" >> $GITHUB_OUTPUT
             exit 1
           fi
           gh issue edit ${{ github.event.number }} --add-label "ci:rev-${NEXT}" >/dev/null 2>&1 || true
 
           IS_BOT_BRANCH=0
-          if [[ "${{ github.event_name }}" = "pull_request" && ( "${{ github.head_ref }}" == bot/* || "${{ github.head_ref }}" == bots/* ) ]]; then
-            IS_BOT_BRANCH=1
-          fi
+          if [[ "${{ github.head_ref }}" == bot/* || "${{ github.head_ref }}" == bots/* ]]; then IS_BOT_BRANCH=1; fi
 
           if [ "${CI_AI_ENABLED}" = "1" ] && [ "${AI_ONLY_FOR_BOT_BRANCHES}" = "1" ] && [ $IS_BOT_BRANCH -eq 1 ]; then
             TITLE="${{ github.event.pull_request.title }}"
             BODY=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
             DIFF="${{ steps.files.outputs.text }}"
-
             jq -Rn --arg model "$MODEL_ID" \
                    --arg mincov "${MIN_COVERAGE}" \
                    --arg t "${T}" --arg f "${F}" --arg e "${E}" --arg cov "${COV}" \
@@ -344,26 +345,25 @@ jobs:
 
             HTTP=$(curl -sS -w "%{http_code}" -o _fix.json -X POST https://models.github.ai/inference/chat/completions \
               -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "X-GitHub-Api-Version": "2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
+              -H "X-GitHub-Api-Version: 2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
 
             msgfile="_msg.md"; : > "$msgfile"
             printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
             if [ "$HTTP" = "200" ]; then
               jq -r '.choices[0].message.content // ""' _fix.json | head -c 4000 >> "$msgfile"
-              printf "\n\n%s\n" "Guidance:" >> "$msgfile"
             else
               printf "%s\n\n" "_AI quota unavailable; posting deterministic instructions." >> "$msgfile"
-              printf "%s\n" "Guidance:" >> "$msgfile"
+              printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
+              printf "%s\n" "- Put tests in \`tests/\` using \`matlab.unittest\`." >> "$msgfile"
+              printf "%s\n" "- Avoid interactive graphics; use \`rng default\`." >> "$msgfile"
+              printf "%s\n" "- Re-run \`matlab -batch run_ci\` until green." >> "$msgfile"
             fi
-            printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
-            printf "%s\n" "- Put tests in \`tests/\` using \`matlab.unittest\`." >> "$msgfile"
-            printf "%s\n" "- Avoid interactive graphics; use \`rng default\`." >> "$msgfile"
-            printf "%s\n" "- Re-run \`matlab -batch run_ci\` until green." >> "$msgfile"
             gh pr comment ${{ github.event.number }} --body-file "$msgfile" >/dev/null 2>&1 || true
+            echo "need_fix=1" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-          # Deterministic fallback (no AI or non-bot PRs)
+          # Deterministic fallback for non-bot PRs or AI disabled
           msgfile="_msg.md"; : > "$msgfile"
           printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
           printf "%s\n" "Goals:" >> "$msgfile"
@@ -372,7 +372,25 @@ jobs:
           printf "%s\n\n" "3) Re-run \`matlab -batch run_ci\` in your VM; push commits until green." >> "$msgfile"
           printf "%s\n" "Guidance:" >> "$msgfile"
           printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
-          printf "%s\n" "- Place tests in \`tests/\`; avoid interactive graphics; use deterministic RNG (\`rng default\`)." >> "$msgfile"
+          printf "%s\n" "- Place tests in \`tests/\`; use deterministic RNG (\`rng default\`)." >> "$msgfile"
           printf "%s\n" "- If a test reveals a bug, fix code in \`src/\` and keep the test." >> "$msgfile"
           gh pr comment ${{ github.event.number }} --body-file "$msgfile" >/dev/null 2>&1 || true
+          echo "need_fix=1" >> $GITHUB_OUTPUT
           exit 1
+
+      # Tidy labels at the very end
+      - name: Cleanup labels
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Always drop "in-progress"
+          gh issue edit ${{ github.event.number }} --remove-label "ci:in-progress" >/dev/null 2>&1 || true
+          # If gate says we don't need fixes, remove needs-work and any rev counters
+          if [ "${{ steps.gate.outputs.need_fix }}" = "0" ]; then
+            gh issue edit ${{ github.event.number }} --remove-label "ci:needs-work" >/dev/null 2>&1 || true
+            for L in $(gh issue view ${{ github.event.number }} --json labels --jq '.labels[].name' | grep '^ci:rev-' || true); do
+              gh issue edit ${{ github.event.number }} --remove-label "$L" >/dev/null 2>&1 || true
+            done
+          fi
