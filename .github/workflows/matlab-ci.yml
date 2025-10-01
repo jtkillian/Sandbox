@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]   # any PR anywhere
   push:
     branches: [main]                                            # registers the check on main
-  workflow_dispatch: {}                                         # manual trigger shows in UI
+  workflow_dispatch: {}                                         # manual run
 
 permissions:
   contents: read
@@ -22,14 +22,14 @@ env:
   MIN_COVERAGE: "60"
 
   # AI controls (quota-safe)
-  MODEL_ID: "openai/o4-mini"
+  MODEL_ID: "openai/o4-mini"   # selected model
   CI_AI_ENABLED: "1"           # 1=allow AI, 0=never call models
   CI_AI_ON_SUCCESS: "0"        # 1=AI summary even on passing PRs (uses more quota)
 
 jobs:
   test-and-review:
     runs-on: ubuntu-latest
-    environment: copilot
+    environment: copilot   # groups the job; easy place to add secrets/rules later
 
     steps:
       - name: Checkout (shallow is fine)
@@ -41,7 +41,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions-ecosystem/action-add-labels@v1
         with: { labels: "ci:in-progress" }
-        continue-on-error: true
+        continue-on-error: true   # forks may block label writes
 
       - name: Enforce agent branch policy (bots only)
         if: ${{ github.event_name == 'pull_request' }}
@@ -66,7 +66,7 @@ jobs:
         with: { labels: "policy:wrong-branch" }
         continue-on-error: true
 
-      # Shallow-safe diffs for PRs
+      # PR-safe diff: fetch only the two SHAs so shallow clones work
       - name: Determine PR SHAs & fetch just those commits
         if: ${{ github.event_name == 'pull_request' }}
         id: shas
@@ -160,7 +160,7 @@ jobs:
           path: ${{ steps.notes.outputs.path }}
         continue-on-error: true
 
-      # One-time INITIAL AI summary on PR "opened" only
+      # One-time INITIAL AI summary on PR "opened" only; skip if label exists or AI disabled
       - name: One-time Initial AI Review (on open)
         if: ${{ github.event_name == 'pull_request' && env.CI_AI_ENABLED == '1' && github.event.action == 'opened' }}
         env:
@@ -179,15 +179,16 @@ jobs:
           HEAD=${{ steps.shas.outputs.head }}
           DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" | head -c 15000)
 
-          # Call GitHub Models; if it fails, write a placeholder file
-          PAYLOAD=$(jq -n --arg m "$MODEL_ID" --arg t "$TITLE" --arg b "$BODY" --arg d "$DIFF" '{
-            model: $m,
-            messages: [
-              {role:"system",content:"You are a concise MATLAB PR reviewer."},
-              {role:"user",content: ("Write a short PR summary (what/why/risks) under ~200 words.\n\nTitle: " + $t + "\nBody: " + $b + "\nDiff (truncated):\n" + $d)}
+          read -r -d '' PAYLOAD <<JSON
+          {
+            "model": "${MODEL_ID}",
+            "messages": [
+              {"role":"system","content":"You are a concise MATLAB PR reviewer."},
+              {"role":"user","content":"Write a short PR summary (what/why/risks). Keep it under ~200 words.\n\nTitle: ${TITLE}\nBody: ${BODY}\nDiff (truncated):\n${DIFF}"}
             ],
-            temperature: 0.2
-          }')
+            "temperature": 0.2
+          }
+          JSON
 
           HTTP=$(curl -sS -w "%{http_code}" -o _ai.json -X POST https://models.github.ai/inference/chat/completions \
             -H "Accept: application/vnd.github+json" \
@@ -198,16 +199,14 @@ jobs:
           mkdir -p ci
           FILE=ci/CI-NOTES-INITIAL.md
           if [ "$HTTP" = "200" ]; then
-            jq -r '.choices[0].message.content // ""' _ai.json | head -c 4000 > _summary.txt
-            printf "# Initial AI Review\n\n%s\n" "$(cat _summary.txt)" > "$FILE"
+            SUMMARY=$(jq -r '.choices[0].message.content // ""' _ai.json | head -c 4000)
+            { echo "# Initial AI Review"; echo "$SUMMARY"; } > "$FILE"
           else
-            printf "# Initial AI Review\n\n_AI quota unavailable; skipping initial summary._\n" > "$FILE"
+            { echo "# Initial AI Review"; echo "_AI quota unavailable; skipping initial summary._"; } > "$FILE"
           fi
 
-          gh api repos/${{ github.repository }}/issues/${{ github.event.number }} -X POST \
-            -f labels='["ci:ai-initialized"]' >/dev/null 2>&1 || true
-
-          gh pr comment ${{ github.event.number }} --body-file "$FILE" || true
+          gh api repos/${{ github.repository }}/issues/${{ github.event.number }} -X POST -f labels='["ci:ai-initialized"]' >/dev/null 2>&1 || true
+          gh pr comment ${{ github.event.number }} --body "$(printf '### (One-time) Initial AI Review\n\n%s' "$(cat "$FILE")")" >/dev/null 2>&1 || true
 
       - name: Upload artifacts
         if: always()
@@ -221,7 +220,7 @@ jobs:
             code-coverage/coverage.xml
           if-no-files-found: warn
 
-      # Gate + notify (AI try -> fallback). Uses body-file to avoid YAML/heredoc issues.
+      # Gate + notify (AI try -> fallback). Uses SHAs for diffs; safe on forks.
       - name: Gate + notify (AI try -> fallback)
         if: always()
         env:
@@ -266,14 +265,22 @@ jobs:
             HEAD=${{ steps.shas.outputs.head }}
             DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" | head -c 16000)
 
-            PAYLOAD=$(jq -n --arg m "$MODEL_ID" --arg t "$TITLE" --arg b "$BODY" --arg d "$DIFF" --arg cov "$MIN_COVERAGE" --argjson tt "$T" --argjson ff "$F" --argjson ee "$E" --arg c "$COV" --arg fl "$FAILTXT" '{
-              model: $m,
-              messages: [
-                {role:"system",content:"You are a senior MATLAB maintainer generating small, targeted fix plans."},
-                {role:"user",content: ("Given the failing tests and coverage gap, produce a short, actionable plan for Copilot: tests to add/repair and minimal code changes. Use bullets only.\nCoverage target: " + $cov + "%\nMetrics: tests=" + ($tt|tostring) + ", failures=" + ($ff|tostring) + ", errors=" + ($ee|tostring) + ", coverage=" + $c + "%\nFailing (trunc):\n" + $fl + "\nTitle: " + $t + "\nBody: " + $b + "\nDiff (trunc):\n" + $d)}
+            # Write message file safely (no heredoc)
+            msgfile="_msg.md"
+            : > "$msgfile"
+            printf "%s\n" "@copilot Please update this PR." >> "$msgfile"
+            printf "\n%s\n" "AI fix plan (suggested):" >> "$msgfile"
+
+            read -r -d '' PAYLOAD <<JSON
+            {
+              "model": "${MODEL_ID}",
+              "messages": [
+                {"role":"system","content":"You are a senior MATLAB maintainer generating small, targeted fix plans."},
+                {"role":"user","content":"Given the failing tests and coverage gap, produce a short, actionable plan for Copilot: tests to add/repair and minimal code changes. Use bullets only.\nCoverage target: ${MIN_COVERAGE}%\nMetrics: tests=${T}, failures=${F}, errors=${E}, coverage=${COV}%\nFailing (trunc):\n${FAILTXT}\nTitle: ${TITLE}\nBody: ${BODY}\nDiff (trunc):\n${DIFF}"}
               ],
-              temperature: 0.2
-            }')
+              "temperature": 0.2
+            }
+            JSON
 
             HTTP=$(curl -sS -w "%{http_code}" -o _fix.json -X POST https://models.github.ai/inference/chat/completions \
               -H "Accept: application/vnd.github+json" \
@@ -282,40 +289,33 @@ jobs:
               -H "Content-Type: application/json" -d "$PAYLOAD" || echo "000")
 
             if [ "$HTTP" = "200" ]; then
-              jq -r '.choices[0].message.content // ""' _fix.json | head -c 4000 > _msg.md
+              PLAN=$(jq -r '.choices[0].message.content // ""' _fix.json | head -c 4000)
+              printf "\n%s\n\n%s\n" "$PLAN" "Guidance:" >> "$msgfile"
             else
-              cat > _msg.md <<'TXT'
-@copilot Please update this PR.
-
-Goals:
-1) Fix failing MATLAB tests/errors while preserving passing behavior.
-2) If coverage is below target, add focused `matlab.unittest` tests under `tests/` to reach the threshold.
-3) Re-run `matlab -batch run_ci` in your VM; push commits until green.
-
-Guidance:
-- Keep changes minimal & scoped.
-- Place tests in `tests/`; avoid interactive graphics; use deterministic RNG (`rng default`).
-- If a test reveals a bug, fix code in `src/` and keep the test.
-TXT
+              printf "\n%s\n" "_AI quota unavailable; posting deterministic instructions._" >> "$msgfile"
+              printf "\n%s\n" "Guidance:" >> "$msgfile"
             fi
 
-            gh pr comment ${{ github.event.number }} --body-file _msg.md >/dev/null 2>&1 || true
+            printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
+            printf "%s\n" "- Put tests in \`tests/\` using \`matlab.unittest\`." >> "$msgfile"
+            printf "%s\n" "- Avoid interactive graphics; use \`rng default\`." >> "$msgfile"
+            printf "%s\n" "- Re-run \`matlab -batch run_ci\` until green." >> "$msgfile"
+
+            gh pr comment ${{ github.event.number }} --body "$(cat "$msgfile")" >/dev/null 2>&1 || true
             exit 1
           fi
 
-          # Deterministic fallback (no models)
-          cat > _msg.md <<'TXT'
-@copilot Please update this PR.
-
-Goals:
-1) Fix failing MATLAB tests/errors while preserving passing behavior.
-2) If coverage is below target, add focused `matlab.unittest` tests under `tests/` to reach the threshold.
-3) Re-run `matlab -batch run_ci` in your VM; push commits until green.
-
-Guidance:
-- Keep changes minimal & scoped.
-- Place tests in `tests/`; avoid interactive graphics; use deterministic RNG (`rng default`).
-- If a test reveals a bug, fix code in `src/` and keep the test.
-TXT
-          gh pr comment ${{ github.event.number }} --body-file _msg.md >/dev/null 2>&1 || true
+          # Deterministic fallback (no models), written without heredoc
+          msgfile="_msg.md"
+          : > "$msgfile"
+          printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
+          printf "%s\n" "Goals:" >> "$msgfile"
+          printf "%s\n" "1) Fix failing MATLAB tests/errors while preserving passing behavior." >> "$msgfile"
+          printf "%s\n" "2) If coverage is below target, add focused \`matlab.unittest\` tests under \`tests/\` to reach the threshold." >> "$msgfile"
+          printf "%s\n\n" "3) Re-run \`matlab -batch run_ci\` in your VM; push commits until green." >> "$msgfile"
+          printf "%s\n" "Guidance:" >> "$msgfile"
+          printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
+          printf "%s\n" "- Place tests in \`tests/\`; avoid interactive graphics; use deterministic RNG (\`rng default\`)." >> "$msgfile"
+          printf "%s\n" "- If a test reveals a bug, fix code in \`src/\` and keep the test." >> "$msgfile"
+          gh pr comment ${{ github.event.number }} --body "$(cat "$msgfile")" >/dev/null 2>&1 || true
           exit 1
