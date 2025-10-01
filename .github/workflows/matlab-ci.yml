@@ -42,7 +42,8 @@ jobs:
       # Auto-assign and auto-request reviewer (you) on PR open
       - name: Auto-assign & request reviewer
         if: ${{ github.event_name == 'pull_request' && github.event.action == 'opened' }}
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr edit ${{ github.event.number }} --add-assignee jtkillian || true
           gh pr edit ${{ github.event.number }} --add-reviewer jtkillian || true
@@ -71,7 +72,7 @@ jobs:
         continue-on-error: true
 
       - name: Label wrong-branch policy
-        if: ${{ and(eq(github.event_name, 'pull_request'), eq(steps.policy.outputs.policy_fail, 'true')) }}
+        if: ${{ github.event_name == 'pull_request' && steps.policy.outputs.policy_fail == 'true' }}
         uses: actions-ecosystem/action-add-labels@v1
         with: { labels: "policy:wrong-branch" }
         continue-on-error: true
@@ -228,7 +229,7 @@ jobs:
 
       # One-time initial AI PR summary for bot PRs only (anti-injection)
       - name: One-time Initial AI Review (bot branches only)
-        if: ${{ and(eq(github.event_name, 'pull_request'), eq(env.CI_AI_ENABLED, '1'), eq(env.AI_ONLY_FOR_BOT_BRANCHES, '1'), or(startsWith(github.head_ref, 'bot/'), startsWith(github.head_ref, 'bots/')), eq(github.event.action, 'opened')) }}
+        if: ${{ github.event_name == 'pull_request' && env.CI_AI_ENABLED == '1' && env.AI_ONLY_FOR_BOT_BRANCHES == '1' && (startsWith(github.head_ref, 'bot/') || startsWith(github.head_ref, 'bots/')) && github.event.action == 'opened' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL_ID: ${{ env.MODEL_ID }}
@@ -276,7 +277,7 @@ jobs:
       # Gate + notify (AI try -> fallback). Allows empty repos to PASS.
       - name: Gate + notify (AI try -> fallback)
         id: gate
-        if: ${{ and(always(), eq(github.event_name, 'pull_request')) }}
+        if: ${{ always() && github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -378,7 +379,7 @@ jobs:
 
       # Tidy labels at the very end
       - name: Cleanup labels
-        if: ${{ and(always(), eq(github.event_name, 'pull_request')) }}
+        if: ${{ always() && github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
