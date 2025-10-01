@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main]
+    branches: ['**']
   workflow_dispatch: {}
 
 permissions:
@@ -26,6 +26,7 @@ env:
   MODEL_ID: "openai/o4-mini"
   CI_AI_ENABLED: "1"
   CI_AI_ON_SUCCESS: "0"
+  AI_ONLY_FOR_BOT_BRANCHES: "1"   # only @copilot ping for bot/* or bots/* PRs
 
 jobs:
   test-and-review:
@@ -68,18 +69,28 @@ jobs:
         with: { labels: "policy:wrong-branch" }
         continue-on-error: true
 
-      - name: Determine PR SHAs & fetch just those commits
+      # Fork-safe "changed files" (no git fetch of fork needed)
+      - name: Compute changed files (PR-safe via API)
         if: ${{ github.event_name == 'pull_request' }}
-        id: shas
+        id: files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          echo "base=$BASE" >> $GITHUB_OUTPUT
-          echo "head=$HEAD" >> $GITHUB_OUTPUT
-          git fetch --no-tags --depth=1 origin $BASE $HEAD || true
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.number }}/files --paginate \
+            --jq '.[] | (.status | ascii_downcase) as $s |
+                 (if $s=="added" then "A"
+                  elif $s=="modified" then "M"
+                  elif $s=="removed" then "D"
+                  elif $s=="renamed" then "R"
+                  else "C" end) + "\t" + .filename' \
+            > _files.txt
+          sed -e 's/^/  /' _files.txt > _files_prefixed.txt || true
+          echo "text<<EOF" >> $GITHUB_OUTPUT
+          cat _files_prefixed.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Set up MATLAB (enables auto-licensing on public repos)
+      - name: Set up MATLAB (auto-licensing for public repos)
         uses: matlab-actions/setup-matlab@v2
 
       - name: Ensure minimal project structure (blank-repo safe)
@@ -94,7 +105,7 @@ jobs:
         run: |
           if [ -f run_ci.m ]; then echo "present=true" >> $GITHUB_OUTPUT; else echo "present=false" >> $GITHUB_OUTPUT; fi
 
-      # Path A: you have run_ci.m – run it via wrapper (errors allowed; we handle fallback)
+      # Path A: run custom run_ci.m (continue-on-error so we can fallback)
       - name: Run MATLAB CI (run_ci.m)
         id: run_matlab
         if: steps.has_run_ci.outputs.present == 'true'
@@ -109,7 +120,7 @@ jobs:
               exit(2);   % mark step failure while allowing workflow to continue
             end
 
-      # Path B: no run_ci.m – just run tests (JUnit + Cobertura) via the official action
+      # Path B: no run_ci.m – use official auto-discovery tests
       - name: Run MATLAB tests (auto-discover)
         id: run_tests
         if: steps.has_run_ci.outputs.present != 'true'
@@ -119,7 +130,7 @@ jobs:
           test-results-junit: test-results/results.xml
           code-coverage-cobertura: code-coverage/coverage.xml
 
-      # Fallback: if no reports exist (wrapper failed), create placeholders so downstream never fails
+      # Ensure reports exist (if MATLAB couldn’t run, write placeholders)
       - name: Ensure reports exist (fallback)
         shell: bash
         run: |
@@ -167,7 +178,7 @@ jobs:
           jq -r .failed_list _out.json >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Build CI-NOTES.md (non-AI)
+      - name: Build CI-NOTES.md (non-AI, fork-safe)
         id: notes
         shell: bash
         run: |
@@ -176,13 +187,13 @@ jobs:
           F=${{ steps.analyze.outputs.failures }}
           E=${{ steps.analyze.outputs.errors }}
           COV=${{ steps.analyze.outputs.coverage }}
+
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE=${{ steps.shas.outputs.base }}
-            HEAD=${{ steps.shas.outputs.head }}
-            DIFF=$(git --no-pager diff --name-status "$BASE...$HEAD" 2>/dev/null | sed -e 's/^/  /')
+            DIFF="${{ steps.files.outputs.text }}"
           else
             DIFF=$(git --no-pager show --name-status --pretty="" ${{ github.sha }} | sed -e 's/^/  /')
           fi
+
           {
             echo "# CI Notes (latest)"
             if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -212,21 +223,22 @@ jobs:
         continue-on-error: true
 
       # One-time initial AI PR summary (quota-safe, JSON-escaped)
-      - name: One-time Initial AI Review (on open)
-        if: ${{ github.event_name == 'pull_request' && env.CI_AI_ENABLED == '1' && github.event.action == 'opened' }}
+      - name: One-time Initial AI Review (bot branches only)
+        if: ${{ github.event_name == 'pull_request'
+                && env.CI_AI_ENABLED == '1'
+                && env.AI_ONLY_FOR_BOT_BRANCHES == '1'
+                && (startsWith(github.head_ref, 'bot/') || startsWith(github.head_ref, 'bots/'))
+                && github.event.action == 'opened' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL_ID: ${{ env.MODEL_ID }}
-          EVENT_JSON: ${{ toJson(github.event) }}
         shell: bash
         run: |
           set -e
           if gh api repos/${{ github.repository }}/issues/${{ github.event.number }} --jq '.labels[].name' 2>/dev/null | grep -qx 'ci:ai-initialized'; then exit 0; fi
           TITLE="${{ github.event.pull_request.title }}"
-          BODY=$(jq -r '.pull_request.body // ""' <<< "$EVENT_JSON")
-          BASE=${{ steps.shas.outputs.base }}
-          HEAD=${{ steps.shas.outputs.head }}
-          DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" 2>/dev/null | head -c 15000)
+          BODY=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
+          DIFF="${{ steps.files.outputs.text }}"
           jq -Rn --arg model "$MODEL_ID" --arg title "$TITLE" --arg body "$BODY" --arg diff "$DIFF" \
             '{
               model: $model,
@@ -238,7 +250,7 @@ jobs:
             }' > payload.json
           HTTP=$(curl -sS -w "%{http_code}" -o _ai.json -X POST https://models.github.ai/inference/chat/completions \
             -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
+            -H "X-GitHub-Api-Version": "2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
           mkdir -p ci
           FILE=ci/CI-NOTES-INITIAL.md
           if [ "$HTTP" = "200" ]; then
@@ -276,6 +288,7 @@ jobs:
           COV: ${{ steps.analyze.outputs.coverage }}
           FAILTXT: ${{ steps.analyze.outputs.failed_list }}
           CI_AI_ENABLED: ${{ env.CI_AI_ENABLED }}
+          AI_ONLY_FOR_BOT_BRANCHES: ${{ env.AI_ONLY_FOR_BOT_BRANCHES }}
         shell: bash
         run: |
           NEEDS=0
@@ -304,13 +317,16 @@ jobs:
           fi
           gh issue edit ${{ github.event.number }} --add-label "ci:rev-${NEXT}" >/dev/null 2>&1 || true
 
-          # Build safe AI prompt (JSON-escaped), then comment via file
-          if [ "${CI_AI_ENABLED}" = "1" ]; then
+          IS_BOT_BRANCH=0
+          if [[ "${{ github.event_name }}" = "pull_request" && ( "${{ github.head_ref }}" == bot/* || "${{ github.head_ref }}" == bots/* ) ]]; then
+            IS_BOT_BRANCH=1
+          fi
+
+          if [ "${CI_AI_ENABLED}" = "1" ] && [ "${AI_ONLY_FOR_BOT_BRANCHES}" = "1" ] && [ $IS_BOT_BRANCH -eq 1 ]; then
             TITLE="${{ github.event.pull_request.title }}"
-            BODY=$(jq -r '.pull_request.body // ""' <<< '${{ toJson(github.event) }}')
-            BASE=${{ steps.shas.outputs.base }}
-            HEAD=${{ steps.shas.outputs.head }}
-            DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" 2>/dev/null | head -c 16000)
+            BODY=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
+            DIFF="${{ steps.files.outputs.text }}"
+
             jq -Rn --arg model "$MODEL_ID" \
                    --arg mincov "${MIN_COVERAGE}" \
                    --arg t "${T}" --arg f "${F}" --arg e "${E}" --arg cov "${COV}" \
@@ -328,7 +344,7 @@ jobs:
 
             HTTP=$(curl -sS -w "%{http_code}" -o _fix.json -X POST https://models.github.ai/inference/chat/completions \
               -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
+              -H "X-GitHub-Api-Version": "2022-11-28" -H "Content-Type: application/json" --data-binary @payload.json || echo "000")
 
             msgfile="_msg.md"; : > "$msgfile"
             printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
@@ -347,7 +363,7 @@ jobs:
             exit 1
           fi
 
-          # Deterministic fallback
+          # Deterministic fallback (no AI or non-bot PRs)
           msgfile="_msg.md"; : > "$msgfile"
           printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
           printf "%s\n" "Goals:" >> "$msgfile"
