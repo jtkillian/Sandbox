@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ['**']
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -388,10 +388,6 @@ jobs:
           # If gate says we don't need fixes, remove needs-work and any rev counters
           if [ "${{ steps.gate.outputs.need_fix }}" = "0" ]; then
             gh issue edit ${{ github.event.number }} --remove-label "ci:needs-work" >/dev/null 2>&1 || true
-            for L in $(gh issue view ${{ github.event.number }} --json labels --jq '.labels[].name' | grep '^ci:rev-' || true); do
-              gh issue edit ${{ github.event.number }} --remove-label "$L" >/dev/null 2>&1 || true
-            done
-          fi
             for L in $(gh issue view ${{ github.event.number }} --json labels --jq '.labels[].name' | grep '^ci:rev-' || true); do
               gh issue edit ${{ github.event.number }} --remove-label "$L" >/dev/null 2>&1 || true
             done
