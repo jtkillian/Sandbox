@@ -1,4 +1,4 @@
-% keywords
+# keywords
 function
 endfunction
 end
@@ -33,8 +33,9 @@ false
 NaN
 Inf
 
-% core funcs
+# core funcs
 abs
+addpath
 all
 any
 arrayfun
@@ -89,6 +90,7 @@ fix
 flip
 fliplr
 flipud
+genpath
 numel
 size
 sort
@@ -123,7 +125,7 @@ integral
 diff
 meshgrid
 
-% linear algebra
+# linear algebra
 det
 rank
 inv
@@ -139,7 +141,7 @@ mrdivide
 pagefun
 mtimesx
 
-% optimization
+# optimization
 optimset
 optimoptions
 fminsearch
@@ -152,7 +154,7 @@ quadgk
 ga
 simulannealbnd
 
-% signal processing
+# signal processing
 fft
 ifft
 fftshift
@@ -175,7 +177,7 @@ highpass
 movmean
 movmedian
 
-% image processing
+# image processing
 imread
 imwrite
 imshow
@@ -209,7 +211,7 @@ imsharpen
 poly2mask
 roipoly
 
-% statistics / ML
+# statistics / ML
 fitlm
 anova1
 ttest
@@ -236,7 +238,7 @@ predict
 loss
 perfcurve
 
-% tables / timetables
+# tables / timetables
 table
 timetable
 readtable
@@ -252,7 +254,7 @@ ismissing
 rmmissing
 standardizeMissing
 
-% io / filesystem
+# io / filesystem
 dir
 fullfile
 fileparts
@@ -268,7 +270,7 @@ save
 load
 matfile
 
-% plotting
+# plotting
 plot
 plot3
 semilogx
@@ -300,7 +302,7 @@ hold off
 grid on
 grid off
 
-% app / gui
+# app / gui
 uifigure
 uilabel
 uibutton
@@ -313,7 +315,7 @@ uipanel
 uitabgroup
 uitab
 
-% parallel / GPU / dl
+# parallel / GPU / dl
 parpool
 parfeval
 gpuArray
@@ -322,7 +324,7 @@ gpuDevice
 dlarray
 dlfeval
 
-% testing / quality
+# testing / quality
 runtests
 testsuite
 fixtures
@@ -342,13 +344,13 @@ checkcode
 cobertura
 junit
 
-% codegen / mex
+# codegen / mex
 coder
 codegen
 mex
 mexcuda
 
-% misc helpers for CI text
+# misc helpers for CI text
 PR
 precommit
 automerge
