@@ -1,45 +1,48 @@
-name: Secret scan (TruffleHog)
-
+name: Merge on /approve
 on:
-  push:
-    branches: ['**']
-  pull_request:
-    types: [opened, synchronize, reopened]
-  workflow_dispatch: {}
+  issue_comment:
+    types: [created]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
-  trufflehog:
+  merge:
+    # Only run when the comment is on a PR AND commenter is you
+    if: ${{ github.event.issue.pull_request && github.actor == 'jtkillian' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history for deep scan)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Compute scan range
-        id: range
+      - name: Guard: comment must be exactly /approve (case-insensitive, allow trailing spaces)
+        id: guard
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-          else
-            BASE="${{ github.event.before }}"
-            HEAD="${{ github.sha }}"
+          body="${{ github.event.comment.body }}"
+          # normalize: trim + lowercase
+          norm="$(printf "%s" "$body" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ "$norm" != "/approve" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
           fi
-          echo "base=$BASE" >> $GITHUB_OUTPUT
-          echo "head=$HEAD" >> $GITHUB_OUTPUT
 
-      - name: TruffleHog - scan changed commits (verified-only)
-        uses: trufflesecurity/trufflehog@v3.90.8
-        with:
-          args: >
-            git
-            --only-verified
-            ${{ steps.range.outputs.base }}
-            ${{ steps.range.outputs.head }}
-            .
+      - name: Exit if not an /approve command
+        if: steps.guard.outputs.skip == 'true'
+        run: echo "Not an /approve command; skipping."
+
+      - name: Approve and enable auto-merge (non-fatal if blocked)
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
+        run: |
+          set -e
+          echo "Approving PR #$PR_NUMBER"
+          gh pr review "$PR_NUMBER" --approve || true
+
+          echo "Enabling auto-merge (merge commit strategy)"
+          # Use --merge (safe default); --rebase can fail if disabled in repo settings
+          if ! gh pr merge "$PR_NUMBER" --merge --auto; then
+            echo "Auto-merge could not be enabled yet (checks/policies not satisfied)."
+            # Do not fail the job; leave a friendly note
+            gh issue comment "$PR_NUMBER" --body "ℹ️ Auto-merge will start as soon as required checks are green and protections are satisfied."
+          fi
