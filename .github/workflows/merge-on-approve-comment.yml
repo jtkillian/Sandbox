@@ -1,0 +1,14 @@
+# .github/workflows/merge-on-approve-comment.yml
+name: Merge on /approve
+on: { issue_comment: { types: [created] } }
+permissions: { contents: write, pull-requests: write }
+jobs:
+  merge:
+    if: ${{ github.event.issue.pull_request && github.event.comment.body == '/approve' && github.actor == 'jtkillian' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          PR_URL="${{ github.event.issue.html_url }}"
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --rebase "$PR_URL"
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }

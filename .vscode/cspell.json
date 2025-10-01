@@ -1,0 +1,17 @@
+{
+	"version": "0.2",
+	"dictionaryDefinitions": [
+		{ "name": "matlab", "path": "./.vscode/dicts/matlab.txt" }
+	],
+	"dictionaries": [ "matlab" ],
+	"languageSettings": [
+		{ "languageId": "matlab", "dictionaries": [ "matlab" ] }
+	],
+	"ignorePaths": [
+		"test-results/**",
+		"code-coverage/**",
+		"ci/**",
+		".git/**",
+		"node_modules/**"
+	]
+}
