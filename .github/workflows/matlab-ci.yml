@@ -1,7 +1,7 @@
 name: MATLAB CI + AI Review Loop
 
 on:
-  pull_request: {}               # run on all PR events
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ['**']
