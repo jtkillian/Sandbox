@@ -29,6 +29,7 @@ env:
 
 jobs:
   test-and-review:
+    name: test-and-review
     runs-on: ubuntu-latest
     environment: copilot
 
