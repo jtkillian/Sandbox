@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main]
+    branches: ['**']
   workflow_dispatch: {}
 
 permissions:
@@ -26,6 +26,7 @@ env:
   MODEL_ID: "openai/o4-mini"
   CI_AI_ENABLED: "1"
   CI_AI_ON_SUCCESS: "0"
+  AI_ONLY_FOR_BOT_BRANCHES: "1"   # only @copilot ping for bot/* or bots/* PRs
 
 jobs:
   test-and-review:
@@ -34,10 +35,17 @@ jobs:
     environment: copilot
 
     steps:
-      - name: Checkout (shallow is fine)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+        with: { fetch-depth: 1 }
+
+      # Auto-assign and auto-request reviewer (you) on PR open
+      - name: Auto-assign & request reviewer
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'opened' }}
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        run: |
+          gh pr edit ${{ github.event.number }} --add-assignee jtkillian || true
+          gh pr edit ${{ github.event.number }} --add-reviewer jtkillian || true
 
       - name: Label PR as in-progress
         if: ${{ github.event_name == 'pull_request' }}
@@ -68,18 +76,28 @@ jobs:
         with: { labels: "policy:wrong-branch" }
         continue-on-error: true
 
-      - name: Determine PR SHAs & fetch just those commits
+      # Fork-safe file list via API (no fragile git fetch of forks)
+      - name: Compute changed files (PR-safe via API)
         if: ${{ github.event_name == 'pull_request' }}
-        id: shas
+        id: files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          echo "base=$BASE" >> $GITHUB_OUTPUT
-          echo "head=$HEAD" >> $GITHUB_OUTPUT
-          git fetch --no-tags --depth=1 origin $BASE $HEAD || true
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.number }}/files --paginate \
+            --jq '.[] | (.status | ascii_downcase) as $s |
+                 (if $s=="added" then "A"
+                  elif $s=="modified" then "M"
+                  elif $s=="removed" then "D"
+                  elif $s=="renamed" then "R"
+                  else "C" end) + "\t" + .filename' \
+            > _files.txt
+          sed -e 's/^/  /' _files.txt > _files_prefixed.txt || true
+          echo "text<<EOF" >> $GITHUB_OUTPUT
+          cat _files_prefixed.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Set up MATLAB (enables auto-licensing on public repos)
+      - name: Set up MATLAB (auto-licensing for public repos)
         uses: matlab-actions/setup-matlab@v2
 
       - name: Ensure minimal project structure (blank-repo safe)
@@ -94,7 +112,7 @@ jobs:
         run: |
           if [ -f run_ci.m ]; then echo "present=true" >> $GITHUB_OUTPUT; else echo "present=false" >> $GITHUB_OUTPUT; fi
 
-      # Path A: you have run_ci.m – run it via wrapper (errors allowed; we handle fallback)
+      # A) Use your custom CI script if present
       - name: Run MATLAB CI (run_ci.m)
         id: run_matlab
         if: steps.has_run_ci.outputs.present == 'true'
@@ -106,10 +124,10 @@ jobs:
               run_ci
             catch ME
               disp(getReport(ME,'extended'));
-              exit(2);   % mark step failure while allowing workflow to continue
+              exit(2);
             end
 
-      # Path B: no run_ci.m – just run tests (JUnit + Cobertura) via the official action
+      # B) Otherwise, run default tests with artifacts
       - name: Run MATLAB tests (auto-discover)
         id: run_tests
         if: steps.has_run_ci.outputs.present != 'true'
@@ -119,7 +137,6 @@ jobs:
           test-results-junit: test-results/results.xml
           code-coverage-cobertura: code-coverage/coverage.xml
 
-      # Fallback: if no reports exist (wrapper failed), create placeholders so downstream never fails
       - name: Ensure reports exist (fallback)
         shell: bash
         run: |
@@ -136,7 +153,7 @@ jobs:
             '</coverage>' > code-coverage/coverage.xml
           [ -f ci/CI-NOTES.md ] || echo "# CI Notes (initial)" > ci/CI-NOTES.md
 
-      - name: Summarize tests & coverage (outputs)
+      - name: Summarize tests & coverage
         id: analyze
         run: |
           python3 - <<'PY' > _out.json
@@ -167,7 +184,7 @@ jobs:
           jq -r .failed_list _out.json >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Build CI-NOTES.md (non-AI)
+      - name: Build CI-NOTES.md (fork-safe)
         id: notes
         shell: bash
         run: |
@@ -177,9 +194,7 @@ jobs:
           E=${{ steps.analyze.outputs.errors }}
           COV=${{ steps.analyze.outputs.coverage }}
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE=${{ steps.shas.outputs.base }}
-            HEAD=${{ steps.shas.outputs.head }}
-            DIFF=$(git --no-pager diff --name-status "$BASE...$HEAD" 2>/dev/null | sed -e 's/^/  /')
+            DIFF="${{ steps.files.outputs.text }}"
           else
             DIFF=$(git --no-pager show --name-status --pretty="" ${{ github.sha }} | sed -e 's/^/  /')
           fi
@@ -211,9 +226,13 @@ jobs:
           path: ${{ steps.notes.outputs.path }}
         continue-on-error: true
 
-      # One-time initial AI PR summary (quota-safe, JSON-escaped)
-      - name: One-time Initial AI Review (on open)
-        if: ${{ github.event_name == 'pull_request' && env.CI_AI_ENABLED == '1' && github.event.action == 'opened' }}
+      # One-time initial AI PR summary for bot PRs only (anti-injection)
+      - name: One-time Initial AI Review (bot branches only)
+        if: ${{ github.event_name == 'pull_request'
+                && env.CI_AI_ENABLED == '1'
+                && env.AI_ONLY_FOR_BOT_BRANCHES == '1'
+                && (startsWith(github.head_ref, 'bot/') || startsWith(github.head_ref, 'bots/'))
+                && github.event.action == 'opened' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL_ID: ${{ env.MODEL_ID }}
@@ -222,10 +241,8 @@ jobs:
           set -e
           if gh api repos/${{ github.repository }}/issues/${{ github.event.number }} --jq '.labels[].name' 2>/dev/null | grep -qx 'ci:ai-initialized'; then exit 0; fi
           TITLE="${{ github.event.pull_request.title }}"
-          BODY=$(jq -r '.pull_request.body // ""' <<< '${{ toJson(github.event) }}')
-          BASE=${{ steps.shas.outputs.base }}
-          HEAD=${{ steps.shas.outputs.head }}
-          DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" 2>/dev/null | head -c 15000)
+          BODY=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
+          DIFF="${{ steps.files.outputs.text }}"
           jq -Rn --arg model "$MODEL_ID" --arg title "$TITLE" --arg body "$BODY" --arg diff "$DIFF" \
             '{
               model: $model,
@@ -262,7 +279,8 @@ jobs:
 
       # Gate + notify (AI try -> fallback). Allows empty repos to PASS.
       - name: Gate + notify (AI try -> fallback)
-        if: always()
+        id: gate
+        if: always() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -275,6 +293,7 @@ jobs:
           COV: ${{ steps.analyze.outputs.coverage }}
           FAILTXT: ${{ steps.analyze.outputs.failed_list }}
           CI_AI_ENABLED: ${{ env.CI_AI_ENABLED }}
+          AI_ONLY_FOR_BOT_BRANCHES: ${{ env.AI_ONLY_FOR_BOT_BRANCHES }}
         shell: bash
         run: |
           NEEDS=0
@@ -287,7 +306,7 @@ jobs:
 
           if [ $NEEDS -eq 0 ]; then
             gh issue edit ${{ github.event.number }} --add-label "ci:passed" >/dev/null 2>&1 || true
-            echo "All good."
+            echo "need_fix=0" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -299,17 +318,18 @@ jobs:
           if [ $NEXT -gt ${{ env.MAX_REVISIONS }} ]; then
             gh issue edit ${{ github.event.number }} --add-label "ci:error-loop" >/dev/null 2>&1 || true
             gh pr comment ${{ github.event.number }} --body "⚠️ Auto-refinement cap (${{ env.MAX_REVISIONS }}) reached. @jtkillian please review." >/dev/null 2>&1 || true
+            echo "need_fix=1" >> $GITHUB_OUTPUT
             exit 1
           fi
           gh issue edit ${{ github.event.number }} --add-label "ci:rev-${NEXT}" >/dev/null 2>&1 || true
 
-          # Build safe AI prompt (JSON-escaped), then comment via file
-          if [ "${CI_AI_ENABLED}" = "1" ]; then
+          IS_BOT_BRANCH=0
+          if [[ "${{ github.head_ref }}" == bot/* || "${{ github.head_ref }}" == bots/* ]]; then IS_BOT_BRANCH=1; fi
+
+          if [ "${CI_AI_ENABLED}" = "1" ] && [ "${AI_ONLY_FOR_BOT_BRANCHES}" = "1" ] && [ $IS_BOT_BRANCH -eq 1 ]; then
             TITLE="${{ github.event.pull_request.title }}"
-            BODY=$(jq -r '.pull_request.body // ""' <<< '${{ toJson(github.event) }}')
-            BASE=${{ steps.shas.outputs.base }}
-            HEAD=${{ steps.shas.outputs.head }}
-            DIFF=$(git --no-pager diff --unified=0 --no-color "$BASE...$HEAD" 2>/dev/null | head -c 16000)
+            BODY=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
+            DIFF="${{ steps.files.outputs.text }}"
             jq -Rn --arg model "$MODEL_ID" \
                    --arg mincov "${MIN_COVERAGE}" \
                    --arg t "${T}" --arg f "${F}" --arg e "${E}" --arg cov "${COV}" \
@@ -333,20 +353,19 @@ jobs:
             printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
             if [ "$HTTP" = "200" ]; then
               jq -r '.choices[0].message.content // ""' _fix.json | head -c 4000 >> "$msgfile"
-              printf "\n\n%s\n" "Guidance:" >> "$msgfile"
             else
               printf "%s\n\n" "_AI quota unavailable; posting deterministic instructions." >> "$msgfile"
-              printf "%s\n" "Guidance:" >> "$msgfile"
+              printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
+              printf "%s\n" "- Put tests in \`tests/\` using \`matlab.unittest\`." >> "$msgfile"
+              printf "%s\n" "- Avoid interactive graphics; use \`rng default\`." >> "$msgfile"
+              printf "%s\n" "- Re-run \`matlab -batch run_ci\` until green." >> "$msgfile"
             fi
-            printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
-            printf "%s\n" "- Put tests in \`tests/\` using \`matlab.unittest\`." >> "$msgfile"
-            printf "%s\n" "- Avoid interactive graphics; use \`rng default\`." >> "$msgfile"
-            printf "%s\n" "- Re-run \`matlab -batch run_ci\` until green." >> "$msgfile"
             gh pr comment ${{ github.event.number }} --body-file "$msgfile" >/dev/null 2>&1 || true
+            echo "need_fix=1" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-          # Deterministic fallback
+          # Deterministic fallback for non-bot PRs or AI disabled
           msgfile="_msg.md"; : > "$msgfile"
           printf "%s\n\n" "@copilot Please update this PR." >> "$msgfile"
           printf "%s\n" "Goals:" >> "$msgfile"
@@ -355,7 +374,25 @@ jobs:
           printf "%s\n\n" "3) Re-run \`matlab -batch run_ci\` in your VM; push commits until green." >> "$msgfile"
           printf "%s\n" "Guidance:" >> "$msgfile"
           printf "%s\n" "- Keep changes minimal & scoped." >> "$msgfile"
-          printf "%s\n" "- Place tests in \`tests/\`; avoid interactive graphics; use deterministic RNG (\`rng default\`)." >> "$msgfile"
+          printf "%s\n" "- Place tests in \`tests/\`; use deterministic RNG (\`rng default\`)." >> "$msgfile"
           printf "%s\n" "- If a test reveals a bug, fix code in \`src/\` and keep the test." >> "$msgfile"
           gh pr comment ${{ github.event.number }} --body-file "$msgfile" >/dev/null 2>&1 || true
+          echo "need_fix=1" >> $GITHUB_OUTPUT
           exit 1
+
+      # Tidy labels at the very end
+      - name: Cleanup labels
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Always drop "in-progress"
+          gh issue edit ${{ github.event.number }} --remove-label "ci:in-progress" >/dev/null 2>&1 || true
+          # If gate says we don't need fixes, remove needs-work and any rev counters
+          if [ "${{ steps.gate.outputs.need_fix }}" = "0" ]; then
+            gh issue edit ${{ github.event.number }} --remove-label "ci:needs-work" >/dev/null 2>&1 || true
+            for L in $(gh issue view ${{ github.event.number }} --json labels --jq '.labels[].name' | grep '^ci:rev-' || true); do
+              gh issue edit ${{ github.event.number }} --remove-label "$L" >/dev/null 2>&1 || true
+            done
+          fi
