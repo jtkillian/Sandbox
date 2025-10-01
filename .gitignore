@@ -1,0 +1,31 @@
+# .gitignore
+slprj/
+codegen/
+*.asv
+*.mex*
+*.mlappinstall
+*.mldatx
+*.fig~
+*.autosave
+
+test-results/
+code-coverage/
+ci/
+
+.DS_Store
+Thumbs.db
+.idea/
+
+node_modules/
+dist/
+__pycache__/
+*.pyc
+
+.env
+.env.*
+
+# VS Code: ignore everything by default, then allow-list our files
+.vscode/*
+!.vscode/tasks.json
+!.vscode/cspell.json
+!.vscode/dicts/

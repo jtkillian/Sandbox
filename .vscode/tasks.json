@@ -1,0 +1,33 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "ci: run_ci",
+			"type": "shell",
+			"command": "${config:MATLAB.installPath}/bin/matlab",
+			"windows": { "command": "${config:MATLAB.installPath}\\bin\\matlab.exe" },
+			"args": [ "-batch", "cd('${workspaceFolder}'); run_ci" ],
+			"problemMatcher": [ ],
+			"presentation": { "reveal": "always", "panel": "shared" },
+			"group": { "kind": "test", "isDefault": true }
+		},
+		{
+			"label": "tests: matlab",
+			"type": "shell",
+			"command": "${config:MATLAB.installPath}/bin/matlab",
+			"windows": { "command": "${config:MATLAB.installPath}\\bin\\matlab.exe" },
+			"args": [ "-batch", "cd('${workspaceFolder}'); runtests" ],
+			"problemMatcher": [ ],
+			"presentation": { "reveal": "always", "panel": "shared" }
+		},
+		{
+			"label": "lint: matlab (checkcode)",
+			"type": "shell",
+			"command": "${config:MATLAB.installPath}/bin/matlab",
+			"windows": { "command": "${config:MATLAB.installPath}\\bin\\matlab.exe" },
+			"args": [ "-batch", "cd('${workspaceFolder}'); checkcode -id ${workspaceFolder}/src" ],
+			"problemMatcher": [ ],
+			"presentation": { "reveal": "always", "panel": "shared" }
+		}
+	]
+}

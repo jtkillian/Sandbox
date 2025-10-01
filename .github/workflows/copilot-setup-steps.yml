@@ -1,0 +1,14 @@
+# .github/workflows/copilot-setup-steps.yml
+name: Copilot Setup Steps
+on:
+  push: { paths: [.github/workflows/copilot-setup-steps.yml] }
+  pull_request: { paths: [.github/workflows/copilot-setup-steps.yml] }
+  workflow_dispatch:
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: matlab-actions/setup-matlab@v2
+      - run: matlab -batch "ver; exit" || true
