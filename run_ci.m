@@ -23,12 +23,13 @@ mkdirIfMissing(testsDir);
 if isfolder(srcDir), addpath(genpath(srcDir)); end
 if isfolder(testsDir), addpath(genpath(testsDir)); end
 
+import matlab.unittest.TestSuite
+import matlab.unittest.TestRunner
+import matlab.unittest.plugins.XMLPlugin
+import matlab.unittest.plugins.CodeCoveragePlugin
+import matlab.unittest.plugins.codecoverage.CoberturaFormat
+
 try
-    import matlab.unittest.TestSuite
-    import matlab.unittest.TestRunner
-    import matlab.unittest.plugins.XMLPlugin
-    import matlab.unittest.plugins.CodeCoveragePlugin
-    import matlab.unittest.plugins.codecoverage.CoberturaFormat
 
     % Discover tests (empty suite is okay)
     suite = TestSuite.fromFolder(testsDir, 'IncludingSubfolders', true);
@@ -56,7 +57,7 @@ try
     end
 
     % Run tests (JUnit written by plugin)
-    ~ = runner.run(suite);
+    runner.run(suite);
 
     % If coverage plugin wasn't attached (no src files), cov already written empty
     if ~isfile(covFile)
