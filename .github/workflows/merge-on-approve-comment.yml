@@ -9,16 +9,14 @@ permissions:
 
 jobs:
   merge:
-    # Only run when the comment is on a PR AND commenter is you
     if: ${{ github.event.issue.pull_request && github.actor == 'jtkillian' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Guard: comment must be exactly /approve (case-insensitive, allow trailing spaces)
+      - name: "Guard: comment must be exactly /approve (case-insensitive, allow trailing spaces)"
         id: guard
         shell: bash
         run: |
           body="${{ github.event.comment.body }}"
-          # normalize: trim + lowercase
           norm="$(printf "%s" "$body" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           if [ "$norm" != "/approve" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
@@ -38,11 +36,8 @@ jobs:
           set -e
           echo "Approving PR #$PR_NUMBER"
           gh pr review "$PR_NUMBER" --approve || true
-
           echo "Enabling auto-merge (merge commit strategy)"
-          # Use --merge (safe default); --rebase can fail if disabled in repo settings
           if ! gh pr merge "$PR_NUMBER" --merge --auto; then
             echo "Auto-merge could not be enabled yet (checks/policies not satisfied)."
-            # Do not fail the job; leave a friendly note
             gh issue comment "$PR_NUMBER" --body "ℹ️ Auto-merge will start as soon as required checks are green and protections are satisfied."
           fi
